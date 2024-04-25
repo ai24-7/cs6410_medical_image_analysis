@@ -18,5 +18,3 @@ ipython_config.py
 # Environments
 .env
 .venv
-
-voc-files
