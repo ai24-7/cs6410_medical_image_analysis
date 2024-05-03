@@ -1,136 +1,679 @@
-import os
-
-import numpy as np
-import imageio
-
-from skimage.io import imshow, imread
-import matplotlib.pyplot as plt
-from skimage.transform import resize
-from concurrent.futures import ThreadPoolExecutor
-
-def color_map(N=256, normalized=True):
-    def bitget(byteval, idx):
-        return ((byteval & (1 << idx)) != 0)
-
-    dtype = 'float32' if normalized else 'uint8'
-    cmap = np.zeros((N, 3), dtype=dtype)
-    for i in range(N):
-        r = g = b = 0
-        c = i
-        for j in range(8):
-            r = r | (bitget(c, 0) << 7-j)
-            g = g | (bitget(c, 1) << 7-j)
-            b = b | (bitget(c, 2) << 7-j)
-            c = c >> 3
-
-        cmap[i] = np.array([r, g, b])
-
-    cmap = cmap/255 if normalized else cmap
-    return cmap
-
-
-def color_map_viz():
-    labels = ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor', 'void']
-    nclasses = 21
-    row_size = 50
-    col_size = 500
-    cmap = color_map()
-    array = np.empty((row_size*(nclasses+1), col_size, cmap.shape[1]), dtype=cmap.dtype)
-    for i in range(nclasses):
-        array[i*row_size:i*row_size+row_size, :] = cmap[i]
-    array[nclasses*row_size:nclasses*row_size+row_size, :] = cmap[-1]
-    
-    imshow(array)
-    plt.yticks([row_size*i+row_size/2 for i in range(nclasses+1)], labels)
-    plt.xticks([])
-    plt.show()
-
-
-def color_map_label(normalized=True):
-    labels = ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor', 'void']
-    nclasses = 21
-    cmap = color_map()
-    label_colors = np.empty((nclasses + 1, 3), dtype=cmap.dtype)  # +1 for the 'void' label
-
-    for i in range(nclasses + 1):
-        label_colors[i] = cmap[i] if i < nclasses else cmap[-1]
-
-    return label_colors
-
-
-
-
-def preprocess_and_save(image_path, mask_path, cmap, output_size=(224, 224), output_dir='output', log = False):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Load and resize image
-    # image = imread(image_path)
-
-    # # Load and resize mask
-    # mask_image = imread(mask_path)
-    
-    image = imageio.imread(image_path)
-    mask_image = imageio.imread(mask_path)
-    if log:
-        plot_sample(image, mask_image, title=f"{image_path}")
-
-    mask_image = resize(mask_image, output_size, anti_aliasing=False, preserve_range=True).astype(int)
-    image = resize(image, output_size, anti_aliasing=True) / 255.0  # Normalize to [0, 1]
-
-
-    # Map color to channel index
-    color_to_index = {tuple(val): idx for idx, val in enumerate(cmap)}
-
-    # Initialize 22-channel binary mask
-    channels = np.zeros((*output_size, 22), dtype=np.float32)
-
-    # Vectorized mask processing
-    # for idx, val in enumerate(cmap):
-    #     channels[:, :, idx] = np.all(mask_image == val, axis=-1)
-
-    channels = np.zeros((*output_size, 22), dtype=np.float32)  # Assuming 22 classes including background
-    for idx, color in enumerate(cmap):
-        mask = np.all(mask_image == np.array(color*255.0, dtype=int), axis=-1)
-        if log:
-            print(mask)    
-        channels[:, :, idx] = mask
-    if log:
-        plot_sample(image, channels, title=f"Sample")
-        # Use this in your preprocessing function to log unique colors of some masks
-        print("Unique colors in mask:", unique_colors(mask_image))
-
-    # Save image and mask to binary files
-    image_filename = os.path.join(output_dir, os.path.basename(image_path) + '_image.npy')
-    mask_filename = os.path.join(output_dir, os.path.basename(mask_path) + '_mask.npy')
-    np.save(image_filename, image)
-    np.save(mask_filename, channels)
-
-def process_dataset(image_dir, mask_dir, cmap):
-    file_names = os.listdir(image_dir)
-    tasks = []
-    count = 1
-    log = False
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for file_name in file_names:
-            count+=1
-            if count > 10:
-                log = False
-            if file_name.endswith('.jpg'):
-                mask_name = file_name[:-4] + '.png'  # Change extension for mask
-                mask_path = os.path.join(mask_dir, mask_name)
-                image_path = os.path.join(image_dir, file_name)
-
-                if os.path.exists(mask_path):
-                    tasks.append(executor.submit(preprocess_and_save, image_path, mask_path, cmap, (224, 224), 'output', log))
-
-    # Optional: wait for all tasks to complete and handle exceptions
-    for task in tasks:
-        task.result()  # This will raise any exceptions caught during the thread execution
-
-# Assume color_map function is defined and provides the cmap array
-cmap = color_map_label()  # Assuming this function returns the correct RGB values for each class
-
-image_dir = 'data/VOC2007/JPEGImages'
-mask_dir = 'data/VOC2007/SegmentationClass'
-process_dataset(image_dir, mask_dir, cmap)
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "import numpy as np\n",
+    "\n",
+    "def plot_sample(image, mask, title=\"\"):\n",
+    "    plt.figure(figsize=(12, 6))\n",
+    "    plt.subplot(1, 2, 1)\n",
+    "    if image.ndim == 3:  # Check if the mask is one-hot encoded\n",
+    "        image = np.argmax(image, axis=-1)  # Convert one-hot encoded mask to single-channel\n",
+    "\n",
+    "    plt.imshow(image)\n",
+    "    plt.title('Image')\n",
+    "    plt.axis('off')\n",
+    "    \n",
+    "    plt.subplot(1, 2, 2)\n",
+    "    if mask.ndim == 3:  # Check if the mask is one-hot encoded\n",
+    "        mask = np.argmax(mask, axis=-1)  # Convert one-hot encoded mask to single-channel\n",
+    "    plt.imshow(mask)  # Using 'jet' to provide distinct colors to different classes\n",
+    "    plt.title('Mask')\n",
+    "    plt.axis('off')\n",
+    "    \n",
+    "    plt.suptitle(title)\n",
+    "    plt.show()\n",
+    "\n",
+    "def unique_colors(mask_image):\n",
+    "    unique = np.unique(mask_image.reshape(-1, mask_image.shape[2]), axis=0)\n",
+    "    return unique\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import numpy as np\n",
+    "from skimage.io import imshow\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "from skimage.transform import resize\n",
+    "from skimage.io import imread\n",
+    "import os\n",
+    "\n",
+    "def color_map(N=256, normalized=True):\n",
+    "    def bitget(byteval, idx):\n",
+    "        return ((byteval & (1 << idx)) != 0)\n",
+    "\n",
+    "    dtype = 'float32' if normalized else 'uint8'\n",
+    "    cmap = np.zeros((N, 3), dtype=dtype)\n",
+    "    for i in range(N):\n",
+    "        r = g = b = 0\n",
+    "        c = i\n",
+    "        for j in range(8):\n",
+    "            r = r | (bitget(c, 0) << 7-j)\n",
+    "            g = g | (bitget(c, 1) << 7-j)\n",
+    "            b = b | (bitget(c, 2) << 7-j)\n",
+    "            c = c >> 3\n",
+    "\n",
+    "        cmap[i] = np.array([r, g, b])\n",
+    "\n",
+    "    cmap = cmap/255 if normalized else cmap\n",
+    "    return cmap\n",
+    "\n",
+    "\n",
+    "def color_map_viz():\n",
+    "    labels = ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor', 'void']\n",
+    "    nclasses = 21\n",
+    "    row_size = 50\n",
+    "    col_size = 500\n",
+    "    cmap = color_map()\n",
+    "    array = np.empty((row_size*(nclasses+1), col_size, cmap.shape[1]), dtype=cmap.dtype)\n",
+    "    for i in range(nclasses):\n",
+    "        array[i*row_size:i*row_size+row_size, :] = cmap[i]\n",
+    "    array[nclasses*row_size:nclasses*row_size+row_size, :] = cmap[-1]\n",
+    "    \n",
+    "    imshow(array)\n",
+    "    plt.yticks([row_size*i+row_size/2 for i in range(nclasses+1)], labels)\n",
+    "    plt.xticks([])\n",
+    "    plt.show()\n",
+    "\n",
+    "\n",
+    "def color_map_label(normalized=True):\n",
+    "    labels = ['background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor', 'void']\n",
+    "    nclasses = 21\n",
+    "    cmap = color_map()\n",
+    "    label_colors = np.empty((nclasses + 1, 3), dtype=cmap.dtype)  # +1 for the 'void' label\n",
+    "\n",
+    "    for i in range(nclasses + 1):\n",
+    "        label_colors[i] = cmap[i] if i < nclasses else cmap[-1]\n",
+    "\n",
+    "    return label_colors\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/tmp/ipykernel_102256/1829778592.py:19: DeprecationWarning: Starting with ImageIO v3 the behavior of this function will switch to that of iio.v3.imread. To keep the current behavior (and make this warning disappear) use `import imageio.v2 as imageio` or call `imageio.v2.imread` directly.\n",
+      "  image = imageio.imread(image_path)\n",
+      "/tmp/ipykernel_102256/1829778592.py:20: DeprecationWarning: Starting with ImageIO v3 the behavior of this function will switch to that of iio.v3.imread. To keep the current behavior (and make this warning disappear) use `import imageio.v2 as imageio` or call `imageio.v2.imread` directly.\n",
+      "  mask_image = imageio.imread(mask_path)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "from skimage.io import imread\n",
+    "from skimage.transform import resize\n",
+    "import os\n",
+    "import imageio\n",
+    "from concurrent.futures import ThreadPoolExecutor\n",
+    "\n",
+    "\n",
+    "def preprocess_and_save(image_path, mask_path, cmap, output_size=(224, 224), output_dir='output', log = False):\n",
+    "    if not os.path.exists(output_dir):\n",
+    "        os.makedirs(output_dir)\n",
+    "\n",
+    "    # Load and resize image\n",
+    "    # image = imread(image_path)\n",
+    "\n",
+    "    # # Load and resize mask\n",
+    "    # mask_image = imread(mask_path)\n",
+    "    \n",
+    "    image = imageio.imread(image_path)\n",
+    "    mask_image = imageio.imread(mask_path)\n",
+    "    if log:\n",
+    "        plot_sample(image, mask_image, title=f\"{image_path}\")\n",
+    "\n",
+    "    mask_image = resize(mask_image, output_size, anti_aliasing=False, preserve_range=True).astype(int)\n",
+    "    image = resize(image, output_size, anti_aliasing=True) / 255.0  # Normalize to [0, 1]\n",
+    "\n",
+    "\n",
+    "    # Map color to channel index\n",
+    "    color_to_index = {tuple(val): idx for idx, val in enumerate(cmap)}\n",
+    "\n",
+    "    # Initialize 22-channel binary mask\n",
+    "    channels = np.zeros((*output_size, 22), dtype=np.float32)\n",
+    "\n",
+    "    # Vectorized mask processing\n",
+    "    # for idx, val in enumerate(cmap):\n",
+    "    #     channels[:, :, idx] = np.all(mask_image == val, axis=-1)\n",
+    "\n",
+    "    channels = np.zeros((*output_size, 22), dtype=np.float32)  # Assuming 22 classes including background\n",
+    "    for idx, color in enumerate(cmap):\n",
+    "        mask = np.all(mask_image == np.array(color*256, dtype=int), axis=-1)\n",
+    "        if log:\n",
+    "            print(mask)    \n",
+    "        channels[:, :, idx] = mask\n",
+    "    if log:\n",
+    "        plot_sample(image, channels, title=f\"Sample\")\n",
+    "        # Use this in your preprocessing function to log unique colors of some masks\n",
+    "        print(\"Unique colors in mask:\", unique_colors(mask_image))\n",
+    "\n",
+    "    # Save image and mask to binary files\n",
+    "    image_filename = os.path.join(output_dir, os.path.basename(image_path) + '_image.npy')\n",
+    "    mask_filename = os.path.join(output_dir, os.path.basename(mask_path) + '_mask.npy')\n",
+    "    np.save(image_filename, image)\n",
+    "    np.save(mask_filename, channels)\n",
+    "\n",
+    "def process_dataset(image_dir, mask_dir, cmap):\n",
+    "    file_names = os.listdir(image_dir)\n",
+    "    tasks = []\n",
+    "    count = 1\n",
+    "    log = False\n",
+    "    with ThreadPoolExecutor(max_workers=4) as executor:\n",
+    "        for file_name in file_names:\n",
+    "            count+=1\n",
+    "            if count > 10:\n",
+    "                log = False\n",
+    "            if file_name.endswith('.jpg'):\n",
+    "                mask_name = file_name[:-4] + '.png'  # Change extension for mask\n",
+    "                mask_path = os.path.join(mask_dir, mask_name)\n",
+    "                image_path = os.path.join(image_dir, file_name)\n",
+    "\n",
+    "                if os.path.exists(mask_path):\n",
+    "                    tasks.append(executor.submit(preprocess_and_save, image_path, mask_path, cmap, (224, 224), 'output', log))\n",
+    "\n",
+    "    # Optional: wait for all tasks to complete and handle exceptions\n",
+    "    for task in tasks:\n",
+    "        task.result()  # This will raise any exceptions caught during the thread execution\n",
+    "\n",
+    "# Assume color_map function is defined and provides the cmap array\n",
+    "cmap = color_map_label()  # Assuming this function returns the correct RGB values for each class\n",
+    "\n",
+    "image_dir = 'data/VOC2007/JPEGImages'\n",
+    "mask_dir = 'data/VOC2007/SegmentationClass'\n",
+    "process_dataset(image_dir, mask_dir, cmap)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(422, 224, 224, 3)\n",
+      "(422, 224, 224, 22)\n"
+     ]
+    },
+    {
+     "ename": "",
+     "evalue": "",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[1;31mThe Kernel crashed while executing code in the current cell or a previous cell. \n",
+      "\u001b[1;31mPlease review the code in the cell(s) to identify a possible cause of the failure. \n",
+      "\u001b[1;31mClick <a href='https://aka.ms/vscodeJupyterKernelCrash'>here</a> for more info. \n",
+      "\u001b[1;31mView Jupyter <a href='command:jupyter.viewOutput'>log</a> for further details."
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "import os\n",
+    "\n",
+    "def load_data(directory):\n",
+    "    images = []\n",
+    "    masks = []\n",
+    "    for filename in sorted(os.listdir(directory)):\n",
+    "        if filename.endswith('_image.npy'):\n",
+    "            images.append(np.load(os.path.join(directory, filename)))\n",
+    "        elif filename.endswith('_mask.npy'):\n",
+    "            masks.append(np.load(os.path.join(directory, filename)))\n",
+    "    return np.array(images), np.array(masks)\n",
+    "\n",
+    "\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "\n",
+    "def split_data(images, masks, train_size=0.8, test_size=0.1, random_state=42):\n",
+    "    # Split into train and remaining (test + validation)\n",
+    "    X_train, X_temp, y_train, y_temp = train_test_split(\n",
+    "        images, masks, train_size=train_size, random_state=random_state, shuffle=True)\n",
+    "\n",
+    "    # Split the remaining into test and validation\n",
+    "    X_val, X_test, y_val, y_test = train_test_split(\n",
+    "        X_temp, y_temp, test_size=0.5, random_state=random_state, shuffle=True)\n",
+    "    \n",
+    "    return X_train, X_val, X_test, y_train, y_val, y_test\n",
+    "\n",
+    "output_dir = 'output'\n",
+    "images, masks = load_data(output_dir)\n",
+    "print(images.shape)\n",
+    "print(masks.shape)\n",
+    "\n",
+    "train_imgs, test_imgs, train_masks, test_masks = train_test_split(images, masks, test_size=0.2, random_state=42)\n",
+    "train_imgs, val_imgs, train_masks, val_masks = train_test_split(train_imgs, train_masks, test_size=0.125, random_state=42)  # 0.125 x 0.8 = 0.1\n",
+    "\n",
+    "# Split the data\n",
+    "# train_imgs, val_imgs, test_imgs, train_masks, val_masks, test_masks = split_data(images, masks)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Assuming 'images' and 'masks' are your datasets\n",
+    "for i in range(15):  # Display first 5 pairs to check\n",
+    "    plot_sample(train_imgs[i], train_masks[i], title=f\"Sample {i+1}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2024-05-03 11:46:50.779547: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:46:53.004410: I tensorflow/compiler/jit/xla_cpu_device.cc:41] Not creating XLA devices, tf_xla_enable_xla_devices not set\n",
+      "2024-05-03 11:46:53.008654: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcuda.so.1\n",
+      "2024-05-03 11:46:53.210449: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.210507: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1720] Found device 0 with properties: \n",
+      "pciBusID: 0000:0a:00.0 name: NVIDIA GeForce RTX 3080 computeCapability: 8.6\n",
+      "coreClock: 1.74GHz coreCount: 70 deviceMemorySize: 12.00GiB deviceMemoryBandwidth: 849.46GiB/s\n",
+      "2024-05-03 11:46:53.210547: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:46:53.245230: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublas.so.10\n",
+      "2024-05-03 11:46:53.245398: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublasLt.so.10\n",
+      "2024-05-03 11:46:53.265353: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcufft.so.10\n",
+      "2024-05-03 11:46:53.269899: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcurand.so.10\n",
+      "2024-05-03 11:46:53.305827: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusolver.so.10\n",
+      "2024-05-03 11:46:53.310637: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusparse.so.10\n",
+      "2024-05-03 11:46:53.373438: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudnn.so.7\n",
+      "2024-05-03 11:46:53.373635: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.373693: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.373701: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1862] Adding visible gpu devices: 0\n",
+      "2024-05-03 11:46:53.374132: I tensorflow/core/platform/cpu_feature_guard.cc:142] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  SSE4.1 SSE4.2 AVX AVX2 FMA\n",
+      "To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.\n",
+      "2024-05-03 11:46:53.374925: I tensorflow/compiler/jit/xla_gpu_device.cc:99] Not creating XLA devices, tf_xla_enable_xla_devices not set\n",
+      "2024-05-03 11:46:53.375021: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.375039: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1720] Found device 0 with properties: \n",
+      "pciBusID: 0000:0a:00.0 name: NVIDIA GeForce RTX 3080 computeCapability: 8.6\n",
+      "coreClock: 1.74GHz coreCount: 70 deviceMemorySize: 12.00GiB deviceMemoryBandwidth: 849.46GiB/s\n",
+      "2024-05-03 11:46:53.375067: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:46:53.375084: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublas.so.10\n",
+      "2024-05-03 11:46:53.375096: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublasLt.so.10\n",
+      "2024-05-03 11:46:53.375105: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcufft.so.10\n",
+      "2024-05-03 11:46:53.375113: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcurand.so.10\n",
+      "2024-05-03 11:46:53.375122: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusolver.so.10\n",
+      "2024-05-03 11:46:53.375130: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusparse.so.10\n",
+      "2024-05-03 11:46:53.375138: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudnn.so.7\n",
+      "2024-05-03 11:46:53.375176: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.375210: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:53.375214: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1862] Adding visible gpu devices: 0\n",
+      "2024-05-03 11:46:53.375601: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:46:56.027565: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1261] Device interconnect StreamExecutor with strength 1 edge matrix:\n",
+      "2024-05-03 11:46:56.027584: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1267]      0 \n",
+      "2024-05-03 11:46:56.027589: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1280] 0:   N \n",
+      "2024-05-03 11:46:56.028398: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:56.028436: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1489] Could not identify NUMA node of platform GPU id 0, defaulting to 0.  Your kernel may not have been built with NUMA support.\n",
+      "2024-05-03 11:46:56.028529: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:56.028594: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:46:56.028622: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1406] Created TensorFlow device (/job:localhost/replica:0/task:0/device:GPU:0 with 10305 MB memory) -> physical GPU (device: 0, name: NVIDIA GeForce RTX 3080, pci bus id: 0000:0a:00.0, compute capability: 8.6)\n"
+     ]
+    },
+    {
+     "ename": "",
+     "evalue": "",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[1;31mThe Kernel crashed while executing code in the current cell or a previous cell. \n",
+      "\u001b[1;31mPlease review the code in the cell(s) to identify a possible cause of the failure. \n",
+      "\u001b[1;31mClick <a href='https://aka.ms/vscodeJupyterKernelCrash'>here</a> for more info. \n",
+      "\u001b[1;31mView Jupyter <a href='command:jupyter.viewOutput'>log</a> for further details."
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "import matplotlib.pyplot as plt\n",
+    "import tensorflow as tf\n",
+    "from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate, Dropout\n",
+    "from tensorflow.keras.models import Model\n",
+    "from tensorflow.keras.optimizers import Adam\n",
+    "\n",
+    "tf.keras.backend.clear_session()\n",
+    "\n",
+    "# Define Dice loss function and coefficient\n",
+    "def dice_coefficient(y_true, y_pred, smooth=1e-6):\n",
+    "    y_true_f = tf.keras.backend.flatten(y_true)\n",
+    "    y_pred_f = tf.keras.backend.flatten(y_pred)\n",
+    "    intersection = tf.keras.backend.sum(y_true_f * y_pred_f)\n",
+    "    return (2. * intersection + smooth) / (tf.keras.backend.sum(y_true_f) + tf.keras.backend.sum(y_pred_f) + smooth)\n",
+    "\n",
+    "def dice_loss(y_true, y_pred):\n",
+    "    return 1 - dice_coefficient(y_true, y_pred)\n",
+    "\n",
+    "def unet_model(input_size=(224, 224, 3), num_classes=22):\n",
+    "    inputs = Input(input_size)\n",
+    "    \n",
+    "    # Downward path\n",
+    "    c1 = Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)\n",
+    "    c1 = Dropout(0.1)(c1)\n",
+    "    c1 = Conv2D(32, (3, 3), activation='relu', padding='same')(c1)\n",
+    "    p1 = MaxPooling2D((2, 2))(c1)\n",
+    "    \n",
+    "    c2 = Conv2D(64, (3, 3), activation='relu', padding='same')(p1)\n",
+    "    c2 = Dropout(0.1)(c2)\n",
+    "    c2 = Conv2D(64, (3, 3), activation='relu', padding='same')(c2)\n",
+    "    p2 = MaxPooling2D((2, 2))(c2)\n",
+    "\n",
+    "    # Bottleneck\n",
+    "    c3 = Conv2D(128, (3, 3), activation='relu', padding='same')(p2)\n",
+    "    c3 = Dropout(0.2)(c3)\n",
+    "    c3 = Conv2D(128, (3, 3), activation='relu', padding='same')(c3)\n",
+    "\n",
+    "    # Upward path\n",
+    "    u4 = UpSampling2D((2, 2))(c3)\n",
+    "    u4 = concatenate([u4, c2])\n",
+    "    c4 = Conv2D(64, (3, 3), activation='relu', padding='same')(u4)\n",
+    "    c4 = Dropout(0.1)(c4)\n",
+    "    c4 = Conv2D(64, (3, 3), activation='relu', padding='same')(c4)\n",
+    "    \n",
+    "    u5 = UpSampling2D((2, 2))(c4)\n",
+    "    u5 = concatenate([u5, c1])\n",
+    "    c5 = Conv2D(32, (3, 3), activation='relu', padding='same')(u5)\n",
+    "    c5 = Dropout(0.1)(c5)\n",
+    "    c5 = Conv2D(32, (3, 3), activation='relu', padding='same')(c5)\n",
+    "    \n",
+    "    outputs = Conv2D(num_classes, (1, 1), activation='sigmoid')(c5)\n",
+    "\n",
+    "    model = Model(inputs=[inputs], outputs=[outputs])\n",
+    "    model.compile(optimizer=Adam(learning_rate=1e-5), loss=dice_loss, metrics=[dice_coefficient])\n",
+    "\n",
+    "    return model\n",
+    "\n",
+    "# Initialize the U-Net model\n",
+    "model = unet_model()\n",
+    "model.summary()  # This will print the summary of the model without needing Graphviz\n",
+    "\n",
+    "# Assume data preparation here (X_train, Y_train, X_val, Y_val)\n",
+    "\n",
+    "# Training the model\n",
+    "history = model.fit(train_imgs, train_masks, validation_data=(val_imgs, val_masks), batch_size=4, epochs=20)\n",
+    "\n",
+    "# Plot training and validation Dice loss\n",
+    "plt.figure(figsize=(8, 5))\n",
+    "plt.plot(history.history['loss'], label='Training Loss')\n",
+    "plt.plot(history.history['val_loss'], label='Validation Loss')\n",
+    "plt.title('Training and Validation Dice Loss')\n",
+    "plt.xlabel('Epochs')\n",
+    "plt.ylabel('Loss')\n",
+    "plt.legend()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2024-05-03 11:44:12.796632: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:44:14.981975: I tensorflow/compiler/jit/xla_cpu_device.cc:41] Not creating XLA devices, tf_xla_enable_xla_devices not set\n",
+      "2024-05-03 11:44:14.985315: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcuda.so.1\n",
+      "2024-05-03 11:44:15.110672: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.110729: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1720] Found device 0 with properties: \n",
+      "pciBusID: 0000:0a:00.0 name: NVIDIA GeForce RTX 3080 computeCapability: 8.6\n",
+      "coreClock: 1.74GHz coreCount: 70 deviceMemorySize: 12.00GiB deviceMemoryBandwidth: 849.46GiB/s\n",
+      "2024-05-03 11:44:15.110761: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:44:15.146112: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublas.so.10\n",
+      "2024-05-03 11:44:15.146171: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublasLt.so.10\n",
+      "2024-05-03 11:44:15.166424: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcufft.so.10\n",
+      "2024-05-03 11:44:15.170745: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcurand.so.10\n",
+      "2024-05-03 11:44:15.208098: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusolver.so.10\n",
+      "2024-05-03 11:44:15.213058: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusparse.so.10\n",
+      "2024-05-03 11:44:15.276009: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudnn.so.7\n",
+      "2024-05-03 11:44:15.276196: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.276264: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.276273: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1862] Adding visible gpu devices: 0\n",
+      "2024-05-03 11:44:15.276684: I tensorflow/core/platform/cpu_feature_guard.cc:142] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  SSE4.1 SSE4.2 AVX AVX2 FMA\n",
+      "To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.\n",
+      "2024-05-03 11:44:15.278594: I tensorflow/compiler/jit/xla_gpu_device.cc:99] Not creating XLA devices, tf_xla_enable_xla_devices not set\n",
+      "2024-05-03 11:44:15.278685: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.278704: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1720] Found device 0 with properties: \n",
+      "pciBusID: 0000:0a:00.0 name: NVIDIA GeForce RTX 3080 computeCapability: 8.6\n",
+      "coreClock: 1.74GHz coreCount: 70 deviceMemorySize: 12.00GiB deviceMemoryBandwidth: 849.46GiB/s\n",
+      "2024-05-03 11:44:15.278727: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:44:15.278742: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublas.so.10\n",
+      "2024-05-03 11:44:15.278753: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublasLt.so.10\n",
+      "2024-05-03 11:44:15.278761: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcufft.so.10\n",
+      "2024-05-03 11:44:15.278769: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcurand.so.10\n",
+      "2024-05-03 11:44:15.278777: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusolver.so.10\n",
+      "2024-05-03 11:44:15.278785: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusparse.so.10\n",
+      "2024-05-03 11:44:15.278794: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudnn.so.7\n",
+      "2024-05-03 11:44:15.278860: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.278901: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:15.278931: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1862] Adding visible gpu devices: 0\n",
+      "2024-05-03 11:44:15.279323: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:44:18.074737: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1261] Device interconnect StreamExecutor with strength 1 edge matrix:\n",
+      "2024-05-03 11:44:18.074758: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1267]      0 \n",
+      "2024-05-03 11:44:18.074763: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1280] 0:   N \n",
+      "2024-05-03 11:44:18.076088: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:18.076128: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1489] Could not identify NUMA node of platform GPU id 0, defaulting to 0.  Your kernel may not have been built with NUMA support.\n",
+      "2024-05-03 11:44:18.076253: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:18.076309: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:44:18.076335: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1406] Created TensorFlow device (/job:localhost/replica:0/task:0/device:GPU:0 with 10305 MB memory) -> physical GPU (device: 0, name: NVIDIA GeForce RTX 3080, pci bus id: 0000:0a:00.0, compute capability: 8.6)\n"
+     ]
+    },
+    {
+     "ename": "",
+     "evalue": "",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[1;31mThe Kernel crashed while executing code in the current cell or a previous cell. \n",
+      "\u001b[1;31mPlease review the code in the cell(s) to identify a possible cause of the failure. \n",
+      "\u001b[1;31mClick <a href='https://aka.ms/vscodeJupyterKernelCrash'>here</a> for more info. \n",
+      "\u001b[1;31mView Jupyter <a href='command:jupyter.viewOutput'>log</a> for further details."
+     ]
+    }
+   ],
+   "source": [
+    "import tensorflow as tf\n",
+    "\n",
+    "from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate, Dropout, BatchNormalization\n",
+    "from tensorflow.keras.models import Model\n",
+    "\n",
+    "tf.keras.backend.clear_session()\n",
+    "\n",
+    "def conv_block(input_tensor, num_filters):\n",
+    "    \"\"\"A block of two convolutional layers with ReLU activations and batch normalization.\"\"\"\n",
+    "    x = Conv2D(num_filters, (3, 3), activation='relu', padding='same')(input_tensor)\n",
+    "    x = BatchNormalization()(x)\n",
+    "    x = Conv2D(num_filters, (3, 3), activation='relu', padding='same')(x)\n",
+    "    x = BatchNormalization()(x)\n",
+    "    return x\n",
+    "\n",
+    "def encoder_block(input_tensor, num_filters):\n",
+    "    \"\"\"An encoder block with a convolution block followed by max pooling.\"\"\"\n",
+    "    x = conv_block(input_tensor, num_filters)\n",
+    "    p = MaxPooling2D((2, 2))(x)\n",
+    "    return x, p\n",
+    "\n",
+    "def decoder_block(input_tensor, concat_tensor, num_filters):\n",
+    "    \"\"\"A decoder block with upsampling, concatenation, and a convolution block.\"\"\"\n",
+    "    x = UpSampling2D((2, 2))(input_tensor)\n",
+    "    x = concatenate([x, concat_tensor])\n",
+    "    x = conv_block(x, num_filters)\n",
+    "    return x\n",
+    "\n",
+    "def unet_model(input_size=(224, 224, 3), num_classes=22):\n",
+    "    inputs = Input(input_size)\n",
+    "\n",
+    "    # Encoder\n",
+    "    c1, p1 = encoder_block(inputs, 64)\n",
+    "    c2, p2 = encoder_block(p1, 128)\n",
+    "    c3, p3 = encoder_block(p2, 256)\n",
+    "    c4, p4 = encoder_block(p3, 512)\n",
+    "    \n",
+    "    # Bridge\n",
+    "    b = conv_block(p4, 1024)\n",
+    "\n",
+    "    # Decoder\n",
+    "    d1 = decoder_block(b, c4, 512)\n",
+    "    d2 = decoder_block(d1, c3, 256)\n",
+    "    d3 = decoder_block(d2, c2, 128)\n",
+    "    d4 = decoder_block(d3, c1, 64)\n",
+    "\n",
+    "    # Output\n",
+    "    outputs = Conv2D(num_classes, (1, 1), activation='softmax')(d4)\n",
+    "\n",
+    "    model = Model(inputs=[inputs], outputs=[outputs])\n",
+    "    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])\n",
+    "\n",
+    "    return model\n",
+    "\n",
+    "# Create the U-Net model\n",
+    "model = unet_model()\n",
+    "model.summary()\n",
+    "\n",
+    "# Training the model\n",
+    "history = model.fit(train_imgs, train_masks, validation_data=(val_imgs, val_masks), batch_size=8, epochs=50)\n",
+    "\n",
+    "# Plot training and validation Dice loss\n",
+    "plt.figure(figsize=(8, 5))\n",
+    "plt.plot(history.history['loss'], label='Training Loss')\n",
+    "plt.plot(history.history['val_loss'], label='Validation Loss')\n",
+    "plt.plot(history.history['accuracy'], label='Accuracy')\n",
+    "plt.title('Training and Validation Dice Loss')\n",
+    "plt.xlabel('Epochs')\n",
+    "plt.ylabel('Loss')\n",
+    "plt.legend()\n",
+    "plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2024-05-03 11:49:54.309895: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:49:56.852876: I tensorflow/core/platform/cpu_feature_guard.cc:142] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  SSE4.1 SSE4.2 AVX AVX2 FMA\n",
+      "To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.\n",
+      "2024-05-03 11:49:56.855000: I tensorflow/compiler/jit/xla_gpu_device.cc:99] Not creating XLA devices, tf_xla_enable_xla_devices not set\n",
+      "2024-05-03 11:49:56.858645: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcuda.so.1\n",
+      "2024-05-03 11:49:57.046729: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:57.046789: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1720] Found device 0 with properties: \n",
+      "pciBusID: 0000:0a:00.0 name: NVIDIA GeForce RTX 3080 computeCapability: 8.6\n",
+      "coreClock: 1.74GHz coreCount: 70 deviceMemorySize: 12.00GiB deviceMemoryBandwidth: 849.46GiB/s\n",
+      "2024-05-03 11:49:57.046812: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:49:57.081960: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublas.so.10\n",
+      "2024-05-03 11:49:57.082028: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcublasLt.so.10\n",
+      "2024-05-03 11:49:57.102178: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcufft.so.10\n",
+      "2024-05-03 11:49:57.106658: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcurand.so.10\n",
+      "2024-05-03 11:49:57.142792: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusolver.so.10\n",
+      "2024-05-03 11:49:57.147711: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcusparse.so.10\n",
+      "2024-05-03 11:49:57.209511: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudnn.so.7\n",
+      "2024-05-03 11:49:57.209654: E tensorflow/stream_exec"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "'/device:GPU:0'"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "utor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:57.209700: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:57.209708: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1862] Adding visible gpu devices: 0\n",
+      "2024-05-03 11:49:57.210083: I tensorflow/stream_executor/platform/default/dso_loader.cc:49] Successfully opened dynamic library libcudart.so.10.1\n",
+      "2024-05-03 11:49:59.779591: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1261] Device interconnect StreamExecutor with strength 1 edge matrix:\n",
+      "2024-05-03 11:49:59.779632: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1267]      0 \n",
+      "2024-05-03 11:49:59.779640: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1280] 0:   N \n",
+      "2024-05-03 11:49:59.780380: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:59.780397: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1489] Could not identify NUMA node of platform GPU id 0, defaulting to 0.  Your kernel may not have been built with NUMA support.\n",
+      "2024-05-03 11:49:59.780444: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:59.780480: E tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:927] could not open file to read NUMA node: /sys/bus/pci/devices/0000:0a:00.0/numa_node\n",
+      "Your kernel may have been built without NUMA support.\n",
+      "2024-05-03 11:49:59.780504: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1406] Created TensorFlow device (/device:GPU:0 with 10305 MB memory) -> physical GPU (device: 0, name: NVIDIA GeForce RTX 3080, pci bus id: 0000:0a:00.0, compute capability: 8.6)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import tensorflow as tf\n",
+    "tf.test.gpu_device_name()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "game_ai",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.18"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
