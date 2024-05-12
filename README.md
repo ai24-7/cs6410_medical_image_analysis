@@ -1,3 +1,2 @@
 # Segmentation using U-net
-## TBD
- 
+## Contributers: toldo4 , ai24-7 
